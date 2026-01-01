@@ -13,7 +13,15 @@ app = Flask(__name__)
 
 # --- КОНФИГУРАЦИЯ ---
 UPLOAD_FOLDER = 'subtitles'
+# Вставьте это в начало app.py
 COOKIES_FILE = 'cookies.txt'
+
+# Если есть переменная среды с куками, создаем файл при запуске
+cookies_data = os.environ.get('COOKIES_DATA')
+if cookies_data:
+    print("💾 Запись cookies из переменной окружения в файл...")
+    with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
+        f.write(cookies_data)
 MAX_AGE_SECONDS = 3600  # Время жизни файла (1 час)
 
 # Создаем папку если её нет
