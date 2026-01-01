@@ -14,14 +14,13 @@ app = Flask(__name__)
 # --- КОНФИГУРАЦИЯ ---
 UPLOAD_FOLDER = 'subtitles'
 COOKIES_FILE = 'cookies.txt'
-# Максимальный размер файла для чтения в память (если send_file не сработает), но send_file предпочтительнее.
-MAX_AGE_SECONDS = 3600  # Время жизни файла
+MAX_AGE_SECONDS = 3600  # Время жизни файла (1 час)
 
 # Создаем папку если её нет
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-# Блокировка для потокобезопасной работы с файлами (очистка и создание)
+# Блокировка для потокобезопасности
 file_lock = threading.Lock()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
@@ -29,7 +28,6 @@ file_lock = threading.Lock()
 def cleanup_old_files():
     """Удаляет старые файлы (старше 1 часа). Потокобезопасно."""
     try:
-        # Блокируем, чтобы не удалить файл, который сейчас создается в другом потоке
         with file_lock:
             now = time.time()
             for filename in os.listdir(UPLOAD_FOLDER):
@@ -47,7 +45,7 @@ def cleanup_old_files():
 def extract_video_id(youtube_url):
     """Извлекает ID видео из URL"""
     patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',  # Добавил .* чтобы захватить остаток строки
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
         r'youtube\.com\/embed\/([^\/\?]+)',
         r'youtu\.be\/([^\?]+)'
     ]
@@ -64,7 +62,6 @@ def get_video_info(video_id):
         req = urllib.request.Request(url)
         req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
         
-        # Увеличим таймаут, так как YouTube может отвечать долго
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json_lib.loads(response.read().decode('utf-8'))
             return {
@@ -80,24 +77,19 @@ def srt_to_text(srt_content):
     lines = srt_content.split('\n')
     text_lines = []
     
-    # Убираем HTML теги (часто встречаются в автосубтитрах, например <font color...>)
     html_tag_pattern = re.compile('<.*?>')
     
     for line in lines:
         line = line.strip()
-        # Пропускаем номера строк, временные метки и пустые строки
         if not line or line.isdigit() or '-->' in line:
             continue
         
-        # Очистка от HTML тегов
         line = re.sub(html_tag_pattern, '', line)
         
-        # Дополнительная проверка на "мусор" вроде &nbsp;
         if line and line not in ['[Music]', '[Music] ', '(Music)']:
             text_lines.append(line)
     
     text = ' '.join(text_lines)
-    # Замена множественных пробелов и переносов строк на один пробел
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
@@ -111,7 +103,6 @@ def create_zip_file(video_title, subtitles_text, video_id):
     zip_filename = f"{video_id}_{uuid.uuid4().hex[:6]}.zip"
     zip_filepath = os.path.join(UPLOAD_FOLDER, zip_filename)
     
-    # Блокируем запись, чтобы избежать конфликтов, если каталог используется конкурентно
     with file_lock:
         with zipfile.ZipFile(zip_filepath, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zipf:
             content = f"{video_title}\n\n{subtitles_text}"
@@ -129,16 +120,14 @@ def download_subtitles_logic(video_id):
         'writeautomaticsub': True,
         'subtitleslangs': ['en'],
         'subtitlesformat': 'srt',
-        'socket_timeout': 20,  # Увеличим таймаут
-        'retries': 3,          # Больше попыток при сбое сети
+        'socket_timeout': 20,
+        'retries': 3,
         'nooverwrites': True,
         'noplaylist': True,
     }
     
     if os.path.exists(COOKIES_FILE):
         ydl_opts['cookiefile'] = COOKIES_FILE
-    else:
-        print("⚠️ cookies.txt не найден, используются публичные методы (могут быть ограничения)")
     
     import tempfile
     try:
@@ -148,16 +137,13 @@ def download_subtitles_logic(video_id):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
             
-            # Ищем самый свежий файл субтитров
             srt_files = [f for f in os.listdir(temp_dir) if f.endswith('.srt')]
             
             if not srt_files:
                 return None
                 
-            # Берем первый найденный (обычно он один)
             srt_path = os.path.join(temp_dir, srt_files[0])
             
-            # Считываем с явным указанием кодировки (иногда utf-8-sig)
             with open(srt_path, 'r', encoding='utf-8-sig') as f:
                 srt_content = f.read()
             
@@ -186,40 +172,40 @@ def home():
     cleanup_old_files()
     cookies_status = "✅ Найден" if os.path.exists(COOKIES_FILE) else "❌ Не найден"
     
+    # Генерируем пример ссылки
+    example_url = f"{request.host_url}download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    
     return f"""
-    <h1>🚀 YouTube Subtitles Downloader (Optimized)</h1>
+    <h1>🚀 YouTube Subtitles Downloader (GET Version)</h1>
     <p>Status: <b>Online</b></p>
     <p>Cookies.txt: {cookies_status}</p>
-    <p>Отправь POST запрос на /download с JSON:</p>
-    <pre>
-    {{
-        "url": "https://youtube.com/watch?v=VIDEO_ID"
-    }}
-    </pre>
+    <p>Отправьте GET запрос на /download с параметром url:</p>
+    <a href="{example_url}" target="_blank">
+        <button style="padding:10px; font-size:16px; cursor:pointer;">🧪 Тестировать (Rick Roll)</button>
+    </a>
+    <p>Или вставьте в адресную строку:</p>
+    <pre>{example_url}</pre>
     """
 
-@app.route('/download', methods=['POST'])
+@app.route('/download') # Убрали methods=['POST'], по умолчанию GET
 def download_subtitles_route():
-    """Эндпоинт для скачивания"""
-    # Запускаем очистку в фоне или перед запросом
+    """Эндпоинт для скачивания через GET"""
     cleanup_old_files()
     
-    # Проверка Content-Type
-    if not request.is_json:
-        return jsonify({'success': False, 'error': 'Content-Type должен быть application/json'}), 400
+    # Получаем параметр 'url' из строки запроса (?url=...)
+    youtube_url = request.args.get('url')
     
-    data = request.get_json()
+    if not youtube_url:
+        # Если URL нет, возвращаем ошибку в виде JSON (браузер может показать его как текст)
+        return jsonify({'success': False, 'error': 'Параметр url обязателен. Пример: /download?url=https://...'}), 400
     
-    if not data or 'url' not in data:
-        return jsonify({'success': False, 'error': 'Отправьте JSON с полем url'}), 400
-    
-    youtube_url = data['url'].strip()
+    youtube_url = youtube_url.strip()
     video_id = extract_video_id(youtube_url)
     
     if not video_id:
         return jsonify({'success': False, 'error': 'Неверный YouTube URL'}), 400
     
-    print(f"📥 Запрос субтитров: {video_id}")
+    print(f"📥 GET Запрос субтитров: {video_id}")
     
     result = download_subtitles_logic(video_id)
     
@@ -246,8 +232,7 @@ def download_subtitles_route():
 
 @app.route('/download/<filename>')
 def download_file(filename):
-    """Отдача файла пользователю (streaming)"""
-    # Защита от выхода из директории (path traversal)
+    """Отдача файла пользователю"""
     if '..' in filename or '/' in filename:
         return jsonify({'success': False, 'error': 'Некорректное имя файла'}), 400
         
@@ -258,7 +243,6 @@ def download_file(filename):
     
     try:
         print(f"📤 Отдача файла: {filename}")
-        # Используем send_file для эффективной отдачи (потоки)
         return send_file(
             filepath,
             mimetype='application/zip',
@@ -271,7 +255,4 @@ def download_file(filename):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    # В продакшене используйте Gunicorn, а не app.run
-    # gunicorn -w 4 -b 0.0.0.0:5000 app:app
-    print(f"🚀 Запускаю сервер на порту {port}")
-    app.run(host='0.0.0.0', port=port, threaded=True) 
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
