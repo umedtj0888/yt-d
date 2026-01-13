@@ -64,7 +64,7 @@ def start_auth():
     # Мы используем упрощенный подход: даем пользователю ссылку для получения кода
     auth_url = (
         "https://www.youtube.com/o/oauth2/auth?"
-        "client_id=674416935537-uiquphecfgtt7v93gdncdppar8jsnu5g.apps.googleusercontent.com&"
+        "client_id=674416935537-a00i319utl2up345d2hqo76b05opkamh.apps.googleusercontent.com&"
         "redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&"
         "response_type=code&"
         "scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fyoutube.force-ssl"
@@ -122,8 +122,8 @@ def submit_code():
         
         # Данные для обмена
         data = urllib.parse.urlencode({
-            'client_id': '674416935537-uiquphecfgtt7v93gdncdppar8jsnu5g.apps.googleusercontent.com',
-            'client_secret': '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T',
+            'client_id': '674416935537-a00i319utl2up345d2hqo76b05opkamh.apps.googleusercontent.com',
+            'client_secret': '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',
             'code': code,
             'grant_type': 'authorization_code',
             'redirect_uri': 'urn:ietf:wg:oauth:2.0:oob'
