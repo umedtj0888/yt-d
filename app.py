@@ -1,4 +1,4 @@
-# app.py
+# app.py - Исправленная версия
 from flask import Flask, request, Response, send_file, abort
 import json
 import os
@@ -20,9 +20,9 @@ UPLOAD_FOLDER = 'subtitles'
 COOKIES_FILE = 'cookies.txt'
 
 # Конфигурация
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024  # 16KB для GET параметров
-MAX_SUBTITLES_SIZE = 10 * 1024 * 1024  # 10MB максимальный размер субтитров
-CLEANUP_AGE = 3600  # 1 час
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024
+MAX_SUBTITLES_SIZE = 10 * 1024 * 1024
+CLEANUP_AGE = 3600
 
 # Настройка логирования
 logging.basicConfig(
@@ -39,7 +39,6 @@ def is_valid_youtube_url(url):
     """Проверяет валидность YouTube URL"""
     parsed = urlparse(url)
     
-    # Разрешенные домены YouTube
     allowed_domains = [
         'youtube.com',
         'www.youtube.com',
@@ -49,11 +48,6 @@ def is_valid_youtube_url(url):
     ]
     
     if parsed.netloc not in allowed_domains:
-        return False
-    
-    # Проверяем наличие пути к видео
-    path = parsed.path.lower()
-    if '/watch' not in path and '/embed/' not in path and parsed.netloc == 'youtube.com':
         return False
     
     return True
@@ -70,7 +64,6 @@ def extract_video_id(youtube_url):
         match = re.search(pattern, youtube_url)
         if match:
             video_id = match.group(1)
-            # Дополнительная валидация ID YouTube
             if re.match(r'^[0-9A-Za-z_-]{11}$', video_id):
                 return video_id
     return None
@@ -90,72 +83,185 @@ def get_video_info(video_id):
         req = urllib.request.Request(url)
         req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         
-        # Устанавливаем лимиты
-        timeout = 10
-        max_size = 1024 * 1024  # 1MB
-        
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            # Проверяем размер ответа
-            content_length = response.headers.get('Content-Length')
-            if content_length and int(content_length) > max_size:
-                raise ValueError("Response too large")
-            
-            data = response.read(max_size).decode('utf-8')
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = response.read(1024 * 1024).decode('utf-8')
             video_info = json.loads(data)
             
             return {
-                'title': video_info.get('title', 'Unknown Video')[:500],  # Ограничиваем длину
-                'author_name': video_info.get('author_name', 'Unknown Author')[:200]
+                'title': video_info.get('title', 'Unknown Video')[:500],
+                'author_name': video_info.get('author_name', 'Unknown Author')[:200],
+                'thumbnail_url': video_info.get('thumbnail_url', '')
             }
             
-    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, json.JSONDecodeError) as e:
+    except Exception as e:
         logger.warning(f"Failed to get video info: {e}")
         return None
-    except Exception as e:
-        logger.error(f"Unexpected error getting video info: {e}")
-        return None
 
-def download_subtitles(video_id):
-    """Безопасно скачивает субтитры с YouTube"""
-    if not is_valid_video_id(video_id):
-        return None
+def try_alternative_subtitle_methods(video_id):
+    """Пробует альтернативные методы получения субтитров"""
+    methods = [
+        # Метод 1: Прямой запрос к YouTube API
+        lambda: get_subtitles_via_api(video_id),
+        # Метод 2: Пробуем несколько форматов
+        lambda: get_subtitles_multiple_formats(video_id),
+        # Метод 3: Пробуем без cookies
+        lambda: get_subtitles_no_cookies(video_id)
+    ]
     
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
-        'writesubtitles': True,
-        'writeautomaticsub': True,
-        'subtitleslangs': ['en'],
-        'subtitlesformat': 'srt',
-        'socket_timeout': 15,
-        'retries': 1,
-        'nooverwrites': True,
-        'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android'],
-                'skip': ['hls', 'dash']
-            }
-        },
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-    }
-    
-    # Безопасная загрузка cookies
-    if os.path.exists(COOKIES_FILE):
+    for method in methods:
         try:
-            # Проверяем размер файла cookies
-            if os.path.getsize(COOKIES_FILE) > 1024 * 1024:  # 1MB
-                logger.warning("Cookies file too large, skipping")
-            else:
-                ydl_opts['cookiefile'] = COOKIES_FILE
-                logger.info("Using cookies.txt")
-        except OSError as e:
-            logger.warning(f"Cannot read cookies file: {e}")
+            result = method()
+            if result:
+                logger.info(f"Subtitles found using alternative method")
+                return result
+        except Exception as e:
+            logger.debug(f"Alternative method failed: {e}")
+            continue
     
+    return None
+
+def get_subtitles_via_api(video_id):
+    """Пробует получить субтитры через неофициальный API"""
     try:
+        # Попытка получить автоматические субтитры
+        url = f"https://www.youtube.com/api/timedtext?lang=en&v={video_id}&fmt=srv3"
+        
+        req = urllib.request.Request(url)
+        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            xml_content = response.read().decode('utf-8', errors='ignore')
+            
+            if not xml_content or 'transcript' not in xml_content.lower():
+                return None
+            
+            # Парсим XML субтитры
+            text = parse_xml_subtitles(xml_content)
+            if text and len(text) > 100:  # Минимальная длина для субтитров
+                video_info = get_video_info(video_id) or {
+                    'title': 'Unknown Video',
+                    'author_name': 'Unknown Author'
+                }
+                
+                return {
+                    'title': video_info['title'],
+                    'author': video_info['author_name'],
+                    'subtitles': text,
+                    'video_id': video_id,
+                    'source': 'api'
+                }
+    except Exception as e:
+        logger.debug(f"API method failed: {e}")
+    
+    return None
+
+def get_subtitles_multiple_formats(video_id):
+    """Пробует скачать субтитры в нескольких форматах"""
+    formats = ['srv3', 'ttml', 'vtt']
+    
+    for fmt in formats:
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': ['en'],
+                'subtitlesformat': fmt,
+                'socket_timeout': 15,
+                'retries': 1,
+                'nooverwrites': True,
+                'noplaylist': True,
+                'ignoreerrors': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            }
+            
+            if os.path.exists(COOKIES_FILE):
+                try:
+                    if os.path.getsize(COOKIES_FILE) <= 1024 * 1024:
+                        ydl_opts['cookiefile'] = COOKIES_FILE
+                except:
+                    pass
+            
+            with tempfile.TemporaryDirectory(prefix='yt_subtitles_') as temp_dir:
+                ydl_opts['outtmpl'] = os.path.join(temp_dir, 'subtitle.%(ext)s')
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    url = f"https://www.youtube.com/watch?v={video_id}"
+                    info = ydl.extract_info(url, download=True)
+                    
+                    # Проверяем наличие субтитров в информации
+                    if info and 'subtitles' in info and info['subtitles']:
+                        for lang in info['subtitles']:
+                            if lang.startswith('en'):
+                                for sub in info['subtitles'][lang]:
+                                    if sub['ext'] == fmt:
+                                        # Загружаем субтитры
+                                        if 'url' in sub:
+                                            return download_subtitles_from_url(sub['url'], video_id, fmt)
+                    
+                    # Ищем файл на диске
+                    for file in os.listdir(temp_dir):
+                        if any(file.endswith(f'.{ext}') for ext in [fmt, 'srt', 'vtt', 'ttml']):
+                            filepath = os.path.join(temp_dir, file)
+                            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                            
+                            text = convert_subtitles_to_text(content, fmt)
+                            if text:
+                                video_info = get_video_info(video_id) or {
+                                    'title': 'Unknown Video',
+                                    'author_name': 'Unknown Author'
+                                }
+                                
+                                return {
+                                    'title': video_info['title'],
+                                    'author': video_info['author_name'],
+                                    'subtitles': text,
+                                    'video_id': video_id,
+                                    'source': f'format_{fmt}'
+                                }
+                            
+        except Exception as e:
+            logger.debug(f"Format {fmt} failed: {e}")
+            continue
+    
+    return None
+
+def get_subtitles_no_cookies(video_id):
+    """Пробует скачать субтитры без cookies"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': ['en'],
+            'subtitlesformat': 'srv3',
+            'socket_timeout': 15,
+            'retries': 2,
+            'nooverwrites': True,
+            'noplaylist': True,
+            'ignoreerrors': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate'
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'skip': ['dash'],
+                    'player_skip': ['configs', 'webpage']
+                }
+            }
+        }
+        
         with tempfile.TemporaryDirectory(prefix='yt_subtitles_') as temp_dir:
             ydl_opts['outtmpl'] = os.path.join(temp_dir, 'subtitle.%(ext)s')
             
@@ -163,54 +269,125 @@ def download_subtitles(video_id):
                 url = f"https://www.youtube.com/watch?v={video_id}"
                 ydl.download([url])
             
-            # Ищем файл субтитров
+            # Ищем любой файл субтитров
             for file in os.listdir(temp_dir):
-                if file.endswith('.srt'):
+                if any(file.endswith(ext) for ext in ['.srv3', '.srt', '.vtt', '.ttml', '.xml']):
                     filepath = os.path.join(temp_dir, file)
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
                     
-                    # Проверяем размер файла
-                    file_size = os.path.getsize(filepath)
-                    if file_size > MAX_SUBTITLES_SIZE:
-                        logger.warning(f"Subtitles file too large: {file_size}")
-                        continue
+                    ext = os.path.splitext(file)[1][1:]
+                    text = convert_subtitles_to_text(content, ext)
                     
-                    # Читаем с обработкой кодировок
-                    for encoding in ['utf-8', 'latin-1', 'cp1252']:
-                        try:
-                            with open(filepath, 'r', encoding=encoding) as f:
-                                srt_content = f.read()
-                            
-                            # Конвертируем в текст
-                            subtitles_text = srt_to_text(srt_content)
-                            
-                            # Ограничиваем размер текста
-                            if len(subtitles_text.encode('utf-8')) > MAX_SUBTITLES_SIZE:
-                                subtitles_text = subtitles_text[:MAX_SUBTITLES_SIZE]
-                            
-                            # Получаем информацию о видео
-                            video_info = get_video_info(video_id) or {
-                                'title': 'Unknown Video',
-                                'author_name': 'Unknown Author'
-                            }
-                            
-                            return {
-                                'title': video_info['title'],
-                                'author': video_info['author_name'],
-                                'subtitles': subtitles_text,
-                                'video_id': video_id
-                            }
-                            
-                        except UnicodeDecodeError:
-                            continue
-                    
-            return None
-            
-    except yt_dlp.utils.DownloadError as e:
-        logger.error(f"Download error: {e}")
-        return None
+                    if text and len(text) > 100:
+                        video_info = get_video_info(video_id) or {
+                            'title': 'Unknown Video',
+                            'author_name': 'Unknown Author'
+                        }
+                        
+                        return {
+                            'title': video_info['title'],
+                            'author': video_info['author_name'],
+                            'subtitles': text,
+                            'video_id': video_id,
+                            'source': 'no_cookies'
+                        }
+    
     except Exception as e:
-        logger.error(f"Unexpected error downloading subtitles: {e}")
-        return None
+        logger.debug(f"No cookies method failed: {e}")
+    
+    return None
+
+def download_subtitles_from_url(subtitle_url, video_id, fmt):
+    """Скачивает субтитры по прямой ссылке"""
+    try:
+        req = urllib.request.Request(subtitle_url)
+        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            content = response.read().decode('utf-8', errors='ignore')
+            
+            text = convert_subtitles_to_text(content, fmt)
+            if text:
+                video_info = get_video_info(video_id) or {
+                    'title': 'Unknown Video',
+                    'author_name': 'Unknown Author'
+                }
+                
+                return {
+                    'title': video_info['title'],
+                    'author': video_info['author_name'],
+                    'subtitles': text,
+                    'video_id': video_id,
+                    'source': 'direct_url'
+                }
+    except Exception as e:
+        logger.debug(f"Failed to download from URL: {e}")
+    
+    return None
+
+def parse_xml_subtitles(xml_content):
+    """Парсит XML субтитры YouTube"""
+    try:
+        # Упрощенный парсинг XML субтитров
+        text_parts = []
+        
+        # Удаляем XML теги и извлекаем текст
+        xml_content = re.sub(r'<\?xml.*?\?>', '', xml_content, flags=re.DOTALL)
+        xml_content = re.sub(r'<text[^>]*>', '', xml_content)
+        xml_content = re.sub(r'</text>', ' ', xml_content)
+        
+        # Удаляем остальные теги
+        xml_content = re.sub(r'<[^>]+>', '', xml_content)
+        
+        # Убираем лишние пробелы
+        text = re.sub(r'\s+', ' ', xml_content).strip()
+        
+        return text
+    except Exception as e:
+        logger.debug(f"Failed to parse XML subtitles: {e}")
+        return ""
+
+def convert_subtitles_to_text(content, fmt):
+    """Конвертирует субтитры в текстовый формат"""
+    if not content:
+        return ""
+    
+    try:
+        if fmt in ['srv3', 'xml', 'ttml']:
+            return parse_xml_subtitles(content)
+        elif fmt == 'vtt':
+            return vtt_to_text(content)
+        elif fmt == 'srt':
+            return srt_to_text(content)
+        else:
+            # Пробуем автоматически определить формат
+            if 'WEBVTT' in content[:100]:
+                return vtt_to_text(content)
+            elif re.search(r'\d+\s+\d{2}:\d{2}:\d{2}', content[:500]):
+                return srt_to_text(content)
+            elif '<transcript>' in content.lower() or '<text ' in content:
+                return parse_xml_subtitles(content)
+            else:
+                # Простой метод - убираем временные метки
+                lines = content.split('\n')
+                text_lines = []
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Пропускаем строки с временными метками
+                    if '-->' in line or re.match(r'^\d{2}:\d{2}', line):
+                        continue
+                    # Пропускаем номера строк
+                    if line.isdigit() and len(text_lines) > 0:
+                        continue
+                    text_lines.append(line)
+                
+                return ' '.join(text_lines).strip()
+    except Exception as e:
+        logger.debug(f"Failed to convert {fmt} subtitles: {e}")
+        return ""
 
 def srt_to_text(srt_content):
     """Конвертирует SRT формат в чистый текст"""
@@ -222,35 +399,177 @@ def srt_to_text(srt_content):
     
     for line in lines:
         line = line.strip()
-        # Пропускаем номера строк и временные метки
         if not line or line.isdigit() or '-->' in line:
             continue
-        # Убираем HTML теги
         line = re.sub(r'<[^>]+>', '', line)
         text_lines.append(line)
     
-    # Объединяем и убираем лишние пробелы
     text = ' '.join(text_lines)
     text = re.sub(r'\s+', ' ', text)
     
     return text.strip()[:MAX_SUBTITLES_SIZE]
 
+def vtt_to_text(vtt_content):
+    """Конвертирует VTT формат в чистый текст"""
+    if not vtt_content:
+        return ""
+    
+    lines = vtt_content.split('\n')
+    text_lines = []
+    in_cue = False
+    
+    for line in lines:
+        line = line.strip()
+        
+        if not line:
+            continue
+        
+        # Пропускаем заголовок WEBVTT
+        if line.startswith('WEBVTT'):
+            continue
+        
+        # Пропускаем заметки и регионы
+        if line.startswith('NOTE ') or line.startswith('REGION '):
+            continue
+        
+        # Пропускаем временные метки
+        if '-->' in line:
+            in_cue = True
+            continue
+        
+        # Пропускаем стили
+        if line.startswith('STYLE '):
+            continue
+        
+        if in_cue and line:
+            line = re.sub(r'<[^>]+>', '', line)
+            text_lines.append(line)
+    
+    text = ' '.join(text_lines)
+    text = re.sub(r'\s+', ' ', text)
+    
+    return text.strip()[:MAX_SUBTITLES_SIZE]
+
+def download_subtitles(video_id):
+    """Основная функция скачивания субтитров с fallback методами"""
+    if not is_valid_video_id(video_id):
+        return None
+    
+    logger.info(f"Attempting to download subtitles for video: {video_id}")
+    
+    # Метод 1: Стандартный метод с yt-dlp
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': ['en'],
+            'subtitlesformat': 'srv3',  # Используем srv3 как основной формат
+            'socket_timeout': 20,
+            'retries': 2,
+            'nooverwrites': True,
+            'noplaylist': True,
+            'ignoreerrors': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept-Language': 'en-US,en;q=0.9'
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'skip': ['dash']
+                }
+            }
+        }
+        
+        # Добавляем cookies если файл существует и валиден
+        if os.path.exists(COOKIES_FILE):
+            try:
+                if os.path.getsize(COOKIES_FILE) <= 1024 * 1024:
+                    ydl_opts['cookiefile'] = COOKIES_FILE
+                    logger.info("Using cookies.txt")
+            except OSError as e:
+                logger.warning(f"Cannot read cookies file: {e}")
+        
+        with tempfile.TemporaryDirectory(prefix='yt_subtitles_') as temp_dir:
+            ydl_opts['outtmpl'] = os.path.join(temp_dir, 'subtitle.%(ext)s')
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                
+                # Получаем информацию без скачивания сначала
+                info = ydl.extract_info(url, download=False)
+                
+                if info and 'subtitles' in info:
+                    logger.info(f"Available subtitles: {list(info.get('subtitles', {}).keys())}")
+                    logger.info(f"Automatic subtitles: {list(info.get('automatic_captions', {}).keys())}")
+                
+                # Теперь пробуем скачать
+                result = ydl.download([url])
+                
+                if result == 0:  # Успешное завершение
+                    # Ищем файл субтитров
+                    for file in os.listdir(temp_dir):
+                        if any(file.endswith(ext) for ext in ['.srv3', '.srt', '.vtt', '.ttml', '.xml']):
+                            filepath = os.path.join(temp_dir, file)
+                            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                            
+                            if content:
+                                ext = os.path.splitext(file)[1][1:]
+                                text = convert_subtitles_to_text(content, ext)
+                                
+                                if text and len(text) > 100:
+                                    video_info = get_video_info(video_id) or {
+                                        'title': 'Unknown Video',
+                                        'author_name': 'Unknown Author'
+                                    }
+                                    
+                                    logger.info(f"Successfully downloaded subtitles via standard method")
+                                    
+                                    return {
+                                        'title': video_info['title'],
+                                        'author': video_info['author_name'],
+                                        'subtitles': text,
+                                        'video_id': video_id,
+                                        'source': 'standard'
+                                    }
+    
+    except Exception as e:
+        logger.warning(f"Standard download method failed: {e}")
+    
+    # Метод 2: Пробуем альтернативные методы
+    logger.info("Trying alternative methods...")
+    alternative_result = try_alternative_subtitle_methods(video_id)
+    
+    if alternative_result:
+        return alternative_result
+    
+    # Метод 3: Пробуем ручной API запрос как последнее средство
+    logger.info("Trying manual API request...")
+    manual_result = get_subtitles_via_api(video_id)
+    
+    if manual_result:
+        return manual_result
+    
+    logger.error(f"All methods failed for video: {video_id}")
+    return None
+
 def create_zip_file(video_title, subtitles_text, video_id):
     """Создает ZIP файл с субтитрами"""
-    # Очищаем название для файла
     clean_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)
     clean_title = re.sub(r'\s+', ' ', clean_title).strip()
-    if len(clean_title) > 100:  # Увеличил лимит
+    if len(clean_title) > 100:
         clean_title = clean_title[:100]
     
     if not clean_title:
         clean_title = "subtitles"
     
-    # Генерируем уникальное имя файла
     zip_filename = f"{video_id}_{uuid.uuid4().hex[:8]}.zip"
     zip_filepath = os.path.join(UPLOAD_FOLDER, zip_filename)
     
-    # Создаем ZIP с безопасным именем файла внутри
     safe_internal_name = secure_filename(f"{clean_title}.txt")
     if not safe_internal_name.endswith('.txt'):
         safe_internal_name += '.txt'
@@ -260,11 +579,11 @@ def create_zip_file(video_title, subtitles_text, video_id):
             content = f"{video_title}\n\n{subtitles_text}"
             zipf.writestr(safe_internal_name, content.encode('utf-8'))
         
+        logger.info(f"Created zip file: {zip_filename}")
         return zip_filename, clean_title
         
     except Exception as e:
         logger.error(f"Error creating zip file: {e}")
-        # Удаляем частично созданный файл
         if os.path.exists(zip_filepath):
             os.remove(zip_filepath)
         raise
@@ -284,7 +603,6 @@ def cleanup_old_files():
                     if file_age > CLEANUP_AGE:
                         os.remove(filepath)
                         count += 1
-                        logger.info(f"Cleaned up old file: {filename}")
                 except (OSError, FileNotFoundError):
                     continue
         
@@ -299,30 +617,19 @@ def validate_filename(filename):
     if not filename or not isinstance(filename, str):
         return False
     
-    # Проверяем безопасное имя файла
     if filename != secure_filename(filename):
         return False
     
-    # Проверяем формат
     if not re.match(r'^[a-zA-Z0-9_-]{11}_[a-f0-9]{8}\.zip$', filename):
         return False
     
-    # Проверяем что файл существует в нашей папке
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     if not os.path.exists(filepath):
         return False
     
     return True
 
-def rate_limit_exempt(f):
-    """Декоратор для исключения из rate limiting (для главной страницы)"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        return f(*args, **kwargs)
-    return decorated_function
-
 @app.route('/')
-@rate_limit_exempt
 def home():
     """Главная страница с инструкцией"""
     cleanup_old_files()
@@ -343,76 +650,93 @@ def home():
             .status {{ padding: 10px; border-radius: 5px; margin: 10px 0; }}
             .success {{ background: #d4edda; color: #155724; }}
             .warning {{ background: #fff3cd; color: #856404; }}
+            .error {{ background: #f8d7da; color: #721c24; }}
             .form {{ margin: 20px 0; }}
-            .input {{ width: 100%; padding: 10px; margin: 10px 0; }}
+            .input {{ width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }}
             .button {{ background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }}
+            .button:hover {{ background: #0056b3; }}
+            .loading {{ display: none; color: #666; }}
         </style>
     </head>
     <body>
         <h1>🚀 YouTube Subtitles Downloader</h1>
         
         <div class="status {'success' if os.path.exists(COOKIES_FILE) else 'warning'}">
-            <strong>Статус:</strong> Cookies.txt: {cookies_status} | Файлов в кэше: {files_count}
+            <strong>Статус:</strong> Cookies: {cookies_status} | Файлов в кэше: {files_count}
         </div>
         
         <h2>📥 Скачать субтитры:</h2>
         
         <div class="form">
-            <input type="text" id="url" class="input" placeholder="https://youtube.com/watch?v=VIDEO_ID">
+            <input type="text" id="url" class="input" placeholder="https://youtube.com/watch?v=VIDEO_ID" value="https://youtube.com/watch?v=dQw4w9WgXcQ">
             <button onclick="downloadSubtitles()" class="button">Скачать субтитры</button>
+            <div id="loading" class="loading">⏳ Обработка, может занять до 30 секунд...</div>
         </div>
         
         <div id="result" style="margin: 20px 0;"></div>
         
-        <h2>📋 Примеры использования:</h2>
+        <h2>📋 Примеры:</h2>
+        <p>Попробуйте эти видео для теста:</p>
+        <ul>
+            <li><a href="#" onclick="setUrl('https://youtube.com/watch?v=dQw4w9WgXcQ')">Rick Astley - Never Gonna Give You Up</a></li>
+            <li><a href="#" onclick="setUrl('https://youtube.com/watch?v=9bZkp7q19f0')">PSY - GANGNAM STYLE</a></li>
+            <li><a href="#" onclick="setUrl('https://youtube.com/watch?v=jNQXAC9IVRw')">Me at the zoo</a></li>
+        </ul>
         
-        <h3>Через браузер:</h3>
+        <h3>API Endpoint:</h3>
         <pre>
-        https://ваш-сервис.onrender.com/download?url=https://youtube.com/watch?v=dQw4w9WgXcQ
-        </pre>
-        
-        <h3>Через curl:</h3>
-        <pre>
-        curl -X GET "https://ваш-сервис.onrender.com/download?url=https://youtube.com/watch?v=dQw4w9WgXcQ"
-        </pre>
-        
-        <h3>Через JavaScript:</h3>
-        <pre>
-        fetch('https://ваш-сервис.onrender.com/download?url=' + encodeURIComponent(youtube_url))
-            .then(response => response.json())
-            .then(data => console.log(data));
+        GET /download?url=URL_VIDEO
         </pre>
         
         <script>
+            function setUrl(url) {{
+                document.getElementById('url').value = url;
+                return false;
+            }}
+            
             function downloadSubtitles() {{
                 const url = document.getElementById('url').value.trim();
                 const resultDiv = document.getElementById('result');
+                const loadingDiv = document.getElementById('loading');
                 
                 if (!url) {{
                     resultDiv.innerHTML = '<div class="status warning">Введите URL видео</div>';
                     return;
                 }}
                 
-                resultDiv.innerHTML = '<div class="status">⏳ Обработка...</div>';
+                resultDiv.innerHTML = '';
+                loadingDiv.style.display = 'block';
                 
                 fetch(`/download?url=${{encodeURIComponent(url)}}`)
-                    .then(response => response.json())
+                    .then(response => {{
+                        if (!response.ok) {{
+                            throw new Error(`HTTP error! Status: ${{response.status}}`);
+                        }}
+                        return response.json();
+                    }})
                     .then(data => {{
+                        loadingDiv.style.display = 'none';
+                        
                         if (data.success) {{
                             resultDiv.innerHTML = `
                                 <div class="status success">
-                                    <strong>✅ Готово!</strong><br>
-                                    Видео: ${{data.video_title}}<br>
-                                    Автор: ${{data.author}}<br>
-                                    <a href="${{data.download_url}}" target="_blank">Скачать ZIP файл</a>
+                                    <strong>✅ Субтитры скачаны!</strong><br>
+                                    <strong>Видео:</strong> ${{data.video_title}}<br>
+                                    <strong>Автор:</strong> ${{data.author}}<br>
+                                    <strong>ID видео:</strong> ${{data.video_id}}<br>
+                                    <strong>Символов:</strong> ${{data.subtitle_length}}<br>
+                                    <strong>Метод:</strong> ${{data.source || 'standard'}}<br>
+                                    <strong>Cookies:</strong> ${{data.cookies_used ? 'использовались' : 'не использовались'}}<br><br>
+                                    <a href="${{data.download_url}}" class="button" target="_blank">📥 Скачать ZIP файл</a>
                                 </div>
                             `;
                         }} else {{
-                            resultDiv.innerHTML = `<div class="status warning">❌ Ошибка: ${{data.error}}</div>`;
+                            resultDiv.innerHTML = `<div class="status error">❌ Ошибка: ${{data.error}}</div>`;
                         }}
                     }})
                     .catch(error => {{
-                        resultDiv.innerHTML = `<div class="status warning">❌ Ошибка сети: ${{error.message}}</div>`;
+                        loadingDiv.style.display = 'none';
+                        resultDiv.innerHTML = `<div class="status error">❌ Ошибка сети: ${{error.message}}</div>`;
                     }});
             }}
         </script>
@@ -426,7 +750,6 @@ def download_subtitles_route():
     cleanup_old_files()
     
     try:
-        # Получаем URL из параметров GET
         youtube_url = request.args.get('url', '').strip()
         
         if not youtube_url:
@@ -439,24 +762,22 @@ def download_subtitles_route():
                 status=400
             )
         
-        # Проверяем валидность URL
         if not is_valid_youtube_url(youtube_url):
             return Response(
                 json.dumps({
                     'success': False,
-                    'error': "Неверный YouTube URL. Используйте ссылку на YouTube видео."
+                    'error': "Неверный YouTube URL"
                 }, ensure_ascii=False),
                 content_type='application/json; charset=utf-8',
                 status=400
             )
         
-        # Извлекаем ID видео
         video_id = extract_video_id(youtube_url)
         if not video_id:
             return Response(
                 json.dumps({
                     'success': False,
-                    'error': "Не удалось извлечь ID видео из URL"
+                    'error': "Не удалось извлечь ID видео"
                 }, ensure_ascii=False),
                 content_type='application/json; charset=utf-8',
                 status=400
@@ -471,17 +792,17 @@ def download_subtitles_route():
             return Response(
                 json.dumps({
                     'success': False,
-                    'error': "Не удалось скачать субтитры. Возможно, их нет или требуется авторизация."
+                    'error': "Субтитры не найдены для этого видео. Возможно, их нет или видео приватное."
                 }, ensure_ascii=False),
                 content_type='application/json; charset=utf-8',
                 status=404
             )
         
-        if not result.get('subtitles'):
+        if not result.get('subtitles') or len(result['subtitles'].strip()) < 50:
             return Response(
                 json.dumps({
                     'success': False,
-                    'error': "Английские субтитры не найдены для этого видео"
+                    'error': "Субтитры найдены, но слишком короткие или пустые"
                 }, ensure_ascii=False),
                 content_type='application/json; charset=utf-8',
                 status=404
@@ -494,7 +815,6 @@ def download_subtitles_route():
             video_id
         )
         
-        # Формируем ответ
         response_data = {
             'success': True,
             'video_title': result['title'],
@@ -504,7 +824,8 @@ def download_subtitles_route():
             'filename': f"{clean_title}.zip",
             'cookies_used': os.path.exists(COOKIES_FILE),
             'language': 'en',
-            'subtitle_length': len(result['subtitles'])
+            'subtitle_length': len(result['subtitles']),
+            'source': result.get('source', 'standard')
         }
         
         logger.info(f"Completed: {result['title']}")
@@ -514,16 +835,6 @@ def download_subtitles_route():
             content_type='application/json; charset=utf-8'
         )
         
-    except zipfile.BadZipFile:
-        logger.error("Bad zip file created")
-        return Response(
-            json.dumps({
-                'success': False,
-                'error': "Ошибка создания архива"
-            }, ensure_ascii=False),
-            content_type='application/json; charset=utf-8',
-            status=500
-        )
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}", exc_info=True)
         return Response(
@@ -537,9 +848,8 @@ def download_subtitles_route():
 
 @app.route('/download/<filename>')
 def download_file(filename):
-    """Скачивание готового файла с валидацией"""
+    """Скачивание готового файла"""
     try:
-        # Валидируем имя файла
         if not validate_filename(filename):
             logger.warning(f"Invalid filename attempt: {filename}")
             abort(404)
@@ -548,13 +858,12 @@ def download_file(filename):
         
         logger.info(f"Sending file: {filename}")
         
-        # Используем безопасную отправку файлов
         return send_file(
             filepath,
             mimetype='application/zip',
             as_attachment=True,
             download_name=filename,
-            conditional=True  # Поддержка If-Modified-Since
+            conditional=True
         )
         
     except FileNotFoundError:
@@ -588,12 +897,6 @@ def internal_error(error):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    
-    # Дополнительная настройка логирования
-    if not app.debug:
-        file_handler = logging.FileHandler('error.log')
-        file_handler.setLevel(logging.WARNING)
-        app.logger.addHandler(file_handler)
     
     logger.info(f"🚀 Запускаю сервер на порту {port}")
     logger.info(f"📁 Папка для файлов: {UPLOAD_FOLDER}")
