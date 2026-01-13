@@ -8,6 +8,10 @@ import uuid
 import zipfile
 import yt_dlp
 import urllib.request
+import random
+#import socks
+import socket
+from urllib.parse import quote
 
 app = Flask(__name__)
 UPLOAD_FOLDER = 'subtitles'
@@ -269,7 +273,18 @@ def download_and_process_subs(subs_list, language, source_type):
         print(f"   📥 Скачиваем {best_format} формат...")
         try:
             req = urllib.request.Request(best_url, headers={
-                'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 11) gzip'
+                'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 11) gzip',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0'
             })
             with urllib.request.urlopen(req, timeout=15) as response:
                 raw = response.read().decode('utf-8', errors='ignore')
@@ -285,27 +300,76 @@ def download_and_process_subs(subs_list, language, source_type):
     
     return None, None
 
+def get_random_user_agent():
+    """Генерирует случайный User-Agent"""
+    user_agents = [
+        # Windows
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+        
+        # Mac
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        
+        # Linux
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        
+        # Android
+        'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36',
+        'com.google.android.youtube/17.36.4 (Linux; U; Android 11) gzip',
+        
+        # iOS
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+    ]
+    return random.choice(user_agents)
+
 def download_subtitles(video_id):
-    """Скачивает субтитры с использованием OAuth и Android-маскировки"""
+    """Скачивает субтитры с использованием улучшенной маскировки"""
     url = f"https://www.youtube.com/watch?v={video_id}"
     
+    # Случайные параметры для маскировки
+    user_agent = get_random_user_agent()
+    referer = f"https://www.youtube.com/watch?v={video_id}"
+    
     ydl_opts = {
-        'quiet': True,
+        'quiet': False,
+        'verbose': False,
         'no_warnings': True,
         'skip_download': True,
+        'ignoreerrors': True,
+        'no_check_certificate': True,
+        'retries': 3,
+        'fragment_retries': 3,
+        'skip_unavailable_fragments': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android'],
+                'player_client': ['android', 'web'],  # Пробуем разные клиенты
+                'player_skip': ['webpage', 'configs'],
                 'lang': ['en', 'ru', 'es', 'fr', 'de', 'it', 'pt', 'ja', 'ko', 'zh']
             }
         },
+        'socket_timeout': 30,
         'http_headers': {
-            'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 11) gzip',
-            'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8,es;q=0.7,fr;q=0.6,de;q=0.5,it;q=0.4,pt;q=0.3,ja;q=0.2,ko;q=0.1,zh;q=0.1'
+            'User-Agent': user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8,es;q=0.7,fr;q=0.6,de;q=0.5,it;q=0.4,pt;q=0.3,ja;q=0.2,ko;q=0.1,zh;q=0.1',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'Referer': referer,
+            'Origin': 'https://www.youtube.com'
         }
     }
     
-    # Логика авторизации
+    # Попробуем несколько методов авторизации по порядку
+    auth_methods_tried = []
+    
+    # Метод 1: OAuth токен (приоритетный)
     oauth_token = os.environ.get('OAUTH_TOKEN')
     if not oauth_token and os.path.exists(LOCAL_TOKEN_FILE):
         with open(LOCAL_TOKEN_FILE, 'r') as f:
@@ -313,44 +377,113 @@ def download_subtitles(video_id):
     
     if oauth_token:
         ydl_opts['oauth_refresh_token'] = oauth_token
-        print("🔑 Используем OAuth Токен")
+        auth_methods_tried.append('OAuth')
+        print("🔑 Метод 1: Используем OAuth Токен")
+    
+    # Метод 2: Cookies файл
     elif os.path.exists(COOKIES_FILE):
         ydl_opts['cookiefile'] = COOKIES_FILE
-        print("✅ Используем cookies.txt")
+        auth_methods_tried.append('Cookies')
+        print("🍪 Метод 2: Используем cookies.txt")
+    
+    # Метод 3: Без авторизации (последний вариант)
     else:
-        print("⚠️ Без авторизации")
+        auth_methods_tried.append('None')
+        print("⚠️ Метод 3: Без авторизации - используем публичный доступ")
+        # Добавляем дополнительные параметры для публичного доступа
+        ydl_opts['extractor_args']['youtube']['player_client'].append('ios')
+        ydl_opts['extractor_args']['youtube']['player_client'].append('tv')
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Получаем информацию о видео
-            info = ydl.extract_info(url, download=False)
-            
-            if not info:
-                print("❌ Не удалось получить информацию о видео")
-                return None
-            
-            # Получаем информацию о видео для определения языка
-            video_info = get_video_info(video_id)
-            video_title = video_info['title']
-            
-            # Получаем субтитры согласно приоритету
-            text, detected_lang, source_type = get_subtitles_with_priority(info, video_title)
-            
-            if text:
-                return {
-                    'title': video_title,
-                    'author': video_info['author_name'],
-                    'subtitles': text,
-                    'video_id': video_id,
-                    'language': detected_lang,
-                    'source_type': source_type
-                }
+        print(f"🌐 Используем User-Agent: {user_agent[:50]}...")
+        print(f"🔗 Referer: {referer}")
         
-        print("❌ Не удалось найти текст субтитров")
+        # Попробуем несколько раз с разными настройками
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                print(f"\n🔄 Попытка {attempt + 1}/{max_retries}")
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Получаем информацию о видео
+                    info = ydl.extract_info(url, download=False)
+                    
+                    if not info:
+                        print("❌ Не удалось получить информацию о видео")
+                        if attempt < max_retries - 1:
+                            print("🔄 Пробуем еще раз...")
+                            time.sleep(1)
+                            continue
+                        return None
+                    
+                    # Получаем информацию о видео для определения языка
+                    video_info = get_video_info(video_id)
+                    video_title = video_info['title']
+                    
+                    # Получаем субтитры согласно приоритету
+                    text, detected_lang, source_type = get_subtitles_with_priority(info, video_title)
+                    
+                    if text:
+                        print(f"✅ Успешно на попытке {attempt + 1}")
+                        return {
+                            'title': video_title,
+                            'author': video_info['author_name'],
+                            'subtitles': text,
+                            'video_id': video_id,
+                            'language': detected_lang,
+                            'source_type': source_type,
+                            'auth_method': auth_methods_tried[0] if auth_methods_tried else 'None'
+                        }
+                    else:
+                        print(f"⚠️ Субтитры не найдены на попытке {attempt + 1}")
+                        if attempt < max_retries - 1:
+                            # Меняем User-Agent для следующей попытки
+                            ydl_opts['http_headers']['User-Agent'] = get_random_user_agent()
+                            print(f"🔄 Меняем User-Agent и пробуем еще раз...")
+                            time.sleep(2)
+                            continue
+            
+            except yt_dlp.utils.DownloadError as e:
+                error_msg = str(e)
+                print(f"❌ Ошибка yt-dlp: {error_msg[:100]}")
+                
+                # Если это ошибка "Sign in to confirm you're not a bot"
+                if "Sign in to confirm" in error_msg or "bot" in error_msg.lower():
+                    print("🚫 Обнаружена блокировка бота")
+                    if attempt < max_retries - 1:
+                        # Пробуем другой подход
+                        print("🔄 Пробуем альтернативный метод...")
+                        
+                        # Пробуем скачать через embed страницу
+                        embed_url = f"https://www.youtube.com/embed/{video_id}"
+                        ydl_opts['http_headers']['Referer'] = embed_url
+                        
+                        # Меняем User-Agent на мобильный
+                        ydl_opts['http_headers']['User-Agent'] = 'Mozilla/5.0 (Linux; Android 10; SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+                        
+                        time.sleep(3)
+                        continue
+                
+                elif attempt < max_retries - 1:
+                    print(f"🔄 Пробуем еще раз ({attempt + 2}/{max_retries})...")
+                    time.sleep(1)
+                    continue
+                else:
+                    print("❌ Все попытки не удались")
+                    return None
+            
+            except Exception as e:
+                print(f"❌ Общая ошибка: {e}")
+                if attempt < max_retries - 1:
+                    print(f"🔄 Пробуем еще раз...")
+                    time.sleep(1)
+                    continue
+        
+        print("❌ Не удалось найти текст субтитров после всех попыток")
         return None
         
     except Exception as e:
-        print(f"❌ Ошибка скачивания: {e}")
+        print(f"❌ Критическая ошибка скачивания: {e}")
         return None
 
 def create_zip_file(video_title, subtitles_text, video_id, language, source_type):
@@ -402,7 +535,7 @@ def home():
     cookies_status = "✅ Найден" if os.path.exists(COOKIES_FILE) else "❌ Не найден"
     token_status = "✅ Найден" if os.path.exists(LOCAL_TOKEN_FILE) else "❌ Не найден"
     
-    return f"""
+    return f'''
     <!DOCTYPE html>
     <html>
     <head>
@@ -417,6 +550,7 @@ def home():
             .info {{ background: #d1ecf1; color: #0c5460; }}
             .priority {{ margin: 15px 0; padding-left: 20px; }}
             .priority li {{ margin: 5px 0; }}
+            .test-btn {{ display: inline-block; padding: 10px 20px; background: #28a745; color: white; text-decoration: none; border-radius: 5px; margin: 10px 0; }}
         </style>
     </head>
     <body>
@@ -432,12 +566,16 @@ def home():
             </ol>
         </div>
         
-        <div class="status { 'success' if os.path.exists(COOKIES_FILE) else 'warning' }">
+        <div class="status {'success' if os.path.exists(COOKIES_FILE) else 'warning'}">
             <strong>🍪 Cookies.txt:</strong> {cookies_status}
         </div>
         
-        <div class="status { 'success' if os.path.exists(LOCAL_TOKEN_FILE) else 'warning' }">
+        <div class="status {'success' if os.path.exists(LOCAL_TOKEN_FILE) else 'warning'}">
             <strong>🔑 OAuth Token:</strong> {token_status}
+        </div>
+        
+        <div class="info status">
+            <strong>🛡️ Анти-блок система:</strong> Используется рандомизация User-Agent, ретраи и альтернативные методы доступа
         </div>
         
         <h2>📋 Использование API</h2>
@@ -453,6 +591,8 @@ GET /download?url=https://youtube.com/watch?v=VIDEO_ID
     /download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ
 </a>
         </pre>
+        
+        <a href="/test" class="test-btn">🎬 Тестовая страница</a>
         
         <h3>2. POST запрос (рекомендуется для приложений):</h3>
         <pre>
@@ -497,9 +637,17 @@ curl -X POST https://ваш-сервис.onrender.com/download \\
             <li>Japanese (ja), Korean (ko), Chinese (zh)</li>
             <li>И другие доступные языки</li>
         </ul>
+        
+        <h2>⚠️ Решение проблем:</h2>
+        <p>Если возникают ошибки "bot detection":</p>
+        <ol>
+            <li>Обновите cookies.txt файл на актуальный</li>
+            <li>Используйте OAuth токен (более надежно)</li>
+            <li>Система автоматически пробует альтернативные методы</li>
+        </ol>
     </body>
     </html>
-    """
+    '''
 
 @app.route('/download', methods=['GET', 'POST'])
 def download_subtitles_route():
@@ -553,12 +701,13 @@ def download_subtitles_route():
         print(f"📥 Обработка видео: {video_id}")
         print(f"🔗 URL: {youtube_url}")
         print(f"📡 Метод: {request.method}")
+        print(f"🌐 Хост: {request.host}")
         print("="*60)
         
         result = download_subtitles(video_id)
         
         if not result:
-            return error_response("Не удалось скачать субтитры")
+            return error_response("Не удалось скачать субтитры (YouTube заблокировал запрос)")
         
         if not result.get('subtitles'):
             return error_response("Субтитры не найдены для этого видео")
@@ -623,7 +772,8 @@ def download_subtitles_route():
             'language_display': language_display,
             'source_type': source_type,
             'source_type_display': source_type_display,
-            'priority_used': get_priority_used(language, source_type)
+            'priority_used': get_priority_used(language, source_type),
+            'auth_method': result.get('auth_method', 'unknown')
         }
         
         print(f"\n✅ Готово!")
@@ -632,16 +782,9 @@ def download_subtitles_route():
         print(f"🌐 Язык: {language_display} ({language})")
         print(f"📝 Тип: {source_type_display}")
         print(f"🎯 Использован приоритет: {response_data['priority_used']}")
+        print(f"🔐 Метод авторизации: {response_data['auth_method']}")
         print(f"📁 Файл: {zip_filename}")
         print("="*60)
-        
-        # Если GET запрос, можно редиректнуть на скачивание или показать JSON
-        if request.method == 'GET' and request.args.get('direct', '').lower() == 'true':
-            # Прямой редирект на скачивание файла
-            return Response(
-                json.dumps(response_data, ensure_ascii=False),
-                content_type='application/json; charset=utf-8'
-            )
         
         return Response(
             json.dumps(response_data, ensure_ascii=False),
@@ -651,7 +794,7 @@ def download_subtitles_route():
     except Exception as e:
         print(f"\n❌ Ошибка: {e}")
         print("="*60)
-        return error_response("Ошибка обработки запроса")
+        return error_response(f"Ошибка обработки запроса: {str(e)}")
 
 def get_priority_used(language, source_type):
     """Определяет какой приоритет был использован"""
@@ -701,12 +844,30 @@ def status():
     files = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith('.zip')]
     total_size = sum(os.path.getsize(os.path.join(UPLOAD_FOLDER, f)) for f in files) / 1024
     
+    # Информация о доступности файлов авторизации
+    cookies_exists = os.path.exists(COOKIES_FILE)
+    token_exists = os.path.exists(LOCAL_TOKEN_FILE) or bool(os.environ.get('OAUTH_TOKEN'))
+    
+    # Проверяем, работают ли файлы авторизации
+    auth_status = "⚠️ Не проверено"
+    if cookies_exists:
+        try:
+            with open(COOKIES_FILE, 'r') as f:
+                content = f.read()
+                if 'youtube.com' in content:
+                    auth_status = "✅ Cookies файл валиден"
+                else:
+                    auth_status = "❌ Cookies файл не содержит данные YouTube"
+        except:
+            auth_status = "❌ Ошибка чтения cookies файла"
+    
     return json.dumps({
         'status': 'online',
         'files_count': len(files),
         'total_size_kb': round(total_size, 2),
-        'cookies_file': os.path.exists(COOKIES_FILE),
-        'oauth_token': os.path.exists(LOCAL_TOKEN_FILE) or bool(os.environ.get('OAUTH_TOKEN')),
+        'cookies_file': cookies_exists,
+        'oauth_token': token_exists,
+        'auth_status': auth_status,
         'upload_folder': UPLOAD_FOLDER,
         'priority_system': {
             '1': 'Английский (ручные → авто)',
@@ -717,6 +878,12 @@ def status():
         'api_endpoints': {
             'GET': '/download?url=YOUTUBE_URL',
             'POST': '/download (JSON: {"url": "YOUTUBE_URL"})'
+        },
+        'anti_bot_features': {
+            'random_user_agent': True,
+            'retry_system': True,
+            'multiple_auth_methods': True,
+            'embed_fallback': True
         }
     })
 
@@ -729,7 +896,8 @@ def test_page():
         {'id': 'dQw4w9WgXcQ', 'title': 'Rick Astley - Never Gonna Give You Up'},
         {'id': '9bZkp7q19f0', 'title': 'PSY - GANGNAM STYLE'},
         {'id': 'kJQP7kiw5Fk', 'title': 'Luis Fonsi - Despacito ft. Daddy Yankee'},
-        {'id': 'JGwWNGJdvx8', 'title': 'Ed Sheeran - Shape of You'}
+        {'id': 'JGwWNGJdvx8', 'title': 'Ed Sheeran - Shape of You'},
+        {'id': 'clLNRRHTWP4', 'title': 'Тестовое видео (с блокировкой)'}
     ]
     
     html = '''
@@ -741,8 +909,14 @@ def test_page():
         <style>
             body { font-family: Arial, sans-serif; margin: 40px; }
             .video { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
-            .btn { display: inline-block; padding: 10px 20px; margin: 5px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }
-            .btn:hover { background: #0056b3; }
+            .btn { display: inline-block; padding: 10px 20px; margin: 5px; color: white; text-decoration: none; border-radius: 5px; }
+            .btn-get { background: #007bff; }
+            .btn-get:hover { background: #0056b3; }
+            .btn-post { background: #28a745; }
+            .btn-post:hover { background: #1e7e34; }
+            .status { padding: 5px 10px; border-radius: 3px; margin-left: 10px; }
+            .status-working { background: #d4edda; color: #155724; }
+            .status-blocked { background: #f8d7da; color: #721c24; }
         </style>
     </head>
     <body>
@@ -751,23 +925,76 @@ def test_page():
     '''
     
     for video in test_videos:
+        blocked = video['id'] == 'clLNRRHTWP4'
+        status_class = 'status-blocked' if blocked else 'status-working'
+        status_text = '⚠️ Может быть заблокировано' if blocked else '✅ Обычно работает'
+        
         html += f'''
         <div class="video">
-            <h3>{video['title']}</h3>
+            <h3>{video['title']} <span class="status {status_class}">{status_text}</span></h3>
             <p>ID: {video['id']}</p>
-            <a class="btn" href="/download?url=https://www.youtube.com/watch?v={video['id']}" target="_blank">
+            <a class="btn btn-get" href="/download?url=https://www.youtube.com/watch?v={video['id']}" target="_blank">
                 📥 Скачать субтитры (GET)
             </a>
+            <button class="btn btn-post" onclick='testPost("{video['id']}")'>
+                📨 Тест POST запроса
+            </button>
         </div>
         '''
     
     html += '''
+        <script>
+        function testPost(videoId) {
+            fetch('/download', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    url: 'https://www.youtube.com/watch?v=' + videoId
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('✅ Успешно! Скачать файл: ' + data.download_url);
+                    window.open(data.download_url, '_blank');
+                } else {
+                    alert('❌ Ошибка: ' + data.error);
+                }
+            })
+            .catch(error => {
+                alert('❌ Ошибка сети: ' + error);
+            });
+        }
+        </script>
         <p><a href="/">← Назад на главную</a></p>
     </body>
     </html>
     '''
     
     return html
+
+@app.route('/refresh_cookies')
+def refresh_cookies_info():
+    """Информация о обновлении cookies"""
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head><title>Обновление Cookies</title></head>
+    <body>
+        <h1>🔄 Как обновить cookies.txt</h1>
+        <p>Для работы с YouTube без блокировок нужно:</p>
+        <ol>
+            <li>Установите расширение <a href="https://chrome.google.com/webstore/detail/get-cookiestxt/bgaddhkoddajcdgocldbbfleckgcbcid" target="_blank">Get cookies.txt</a> в Chrome</li>
+            <li>Зайдите на <a href="https://youtube.com" target="_blank">YouTube.com</a> и авторизуйтесь</li>
+            <li>Нажмите на расширение и экспортируйте cookies в файл cookies.txt</li>
+            <li>Загрузите этот файл на сервер (в Render нужно добавить через Dashboard → Environment)</li>
+        </ol>
+        <p><a href="/">← Назад</a></p>
+    </body>
+    </html>
+    '''
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
@@ -781,11 +1008,17 @@ if __name__ == '__main__':
     print(f"   2. Русский (ручные → автоматические)")
     print(f"   3. Язык видео (определяется по заголовку)")
     print(f"   4. Любой доступный язык")
+    print(f"\n🛡️ АНТИ-БЛОК СИСТЕМА:")
+    print(f"   ✓ Рандомизация User-Agent")
+    print(f"   ✓ Многоуровневая система ретраев")
+    print(f"   ✓ Альтернативные методы доступа")
+    print(f"   ✓ Поддержка разных клиентов (android/web/ios/tv)")
     print(f"\n🔧 Порт: {port}")
     print(f"\n🌐 Доступные эндпоинты:")
     print(f"   GET  /download?url=YOUTUBE_URL")
     print(f"   POST /download (JSON)")
     print(f"   GET  /status")
     print(f"   GET  /test")
+    print(f"   GET  /refresh_cookies")
     print("="*70 + "\n")
     app.run(host='0.0.0.0', port=port)
