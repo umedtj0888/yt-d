@@ -1,253 +1,163 @@
-from flask import Flask, request, Response, send_file, abort
 import os
 import json
 import logging
-import re
-import tempfile
-import zipfile
-import uuid
 import yt_dlp
+from flask import Flask, request, Response, redirect
 
 app = Flask(__name__)
 
-# === КОНФИГУРАЦИЯ ===
-DOWNLOAD_FOLDER = 'downloads'
-PORT = 5000
-COOKIES_FILE = 'cookies.txt'
+# Файл, куда мы сохраним токен
+TOKEN_FILE = 'oauth_token.txt'
 
-# Создаем папку
-if not os.path.exists(DOWNLOAD_FOLDER):
-    os.makedirs(DOWNLOAD_FOLDER)
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
-
-def get_video_id(url):
-    """Извлекает ID видео"""
-    pattern = r'(?:v=|\/)([0-9A-Za-z_-]{11}).*'
-    match = re.search(pattern, url)
-    return match.group(1) if match else None
-
-def clean_text(text):
-    """Очищает текст от тегов и мусора"""
-    if not text:
-        return ""
-    
-    # Удаляем XML/VTT теги вида <tag>content</tag>
-    text = re.sub(r'<[^>]+>', '', text)
-    
-    # Разбиваем на строки и фильтруем
-    lines = text.split('\n')
-    clean_lines = []
-    
-    for line in lines:
-        line = line.strip()
-        # Пропускаем временные метки
-        if '-->' in line:
-            continue
-        # Пропускаем служебные строки
-        if not line or line.isdigit() or line.startswith('NOTE') or line.startswith('Style'):
-            continue
-        clean_lines.append(line)
-    
-    return ' '.join(clean_lines).strip()
-
-def process_subtitles_from_memory(subs):
-    """
-    Скачивает субтитры по прямой ссылке из памяти yt-dlp
-    """
-    if not subs:
-        return None
-        
-    target_lang = 'en'
-    best_url = None
-    
-    # Приоритет: ручные > автоматические
-    # Перебираем доступные языки
-    if target_lang in subs:
-        for sub in subs[target_lang]:
-            if 'url' in sub:
-                best_url = sub['url']
-                logger.info(f"Found direct URL for subtitles: {target_lang}")
-                break
-                
-    if not best_url:
-        return None
-
-    # Скачиваем содержимое по URL
-    import urllib.request
-    try:
-        req = urllib.request.Request(best_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            content = response.read().decode('utf-8')
-            
-            text = clean_text(content)
-            if len(text) > 50:
-                return text
-    except Exception as e:
-        logger.error(f"Failed to download subtitle content: {e}")
-        
-    return None
-
-def get_subtitles_via_download(ydl, video_url):
-    """
-    Резервный метод: скачивает файл на диск, если прямая ссылка не сработала.
-    """
-    fd, path = tempfile.mkstemp(suffix='.vtt')
-    try:
-        opts = {
-            'quiet': True,
-            'skip_download': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': ['en'],
-            'subtitlesformat': 'vtt',
-            'outtmpl': path,
-            'overwrite': True
-        }
-        
-        with yt_dlp.YoutubeDL(opts) as ydl_down:
-            ydl_down.download([video_url])
-            
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            return clean_text(content)
-    finally:
-        try:
-            os.close(fd)
-            os.remove(path)
-        except:
-            pass
-    return None
-
-# === ОСНОВНАЯ ЛОГИКА ===
-
-def process_video(video_id):
-    logger.info(f"Processing: {video_id}")
-    
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    
-    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Используем Android клиент, чтобы избежать капчи
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extractor_args': {
-            'youtube': {
-                # Приоритет Android клиенту, он реже ловит "Sign in to confirm"
-                'player_client': ['android', 'web']
-            }
-        },
-        'http_headers': {
-            'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 11) gzip'
-        }
-    }
-    
-    if os.path.exists(COOKIES_FILE):
-        ydl_opts['cookiefile'] = COOKIES_FILE
-        logger.info("🍪 Cookies file loaded.")
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 1. Извлекаем информацию (без скачивания видео)
-            info = ydl.extract_info(url, download=False)
-            
-            if not info:
-                logger.warning("No info returned.")
-                return None
-            
-            title = info.get('title', 'Unknown Video')
-            logger.info(f"Video found: {title}")
-            
-            # 2. Пытаемся получить прямую ссылку на субтитры
-            subtitles = info.get('subtitles')
-            automatic_captions = info.get('automatic_captions')
-            
-            text = None
-            
-            # Пробуем обычные
-            if subtitles:
-                text = process_subtitles_from_memory(subtitles)
-            
-            # Пробуем автоматические
-            if not text and automatic_captions:
-                text = process_subtitles_from_memory(automatic_captions)
-            
-            # 3. Если прямая ссылка не дала результата, качаем принудительно
-            if not text:
-                logger.info("Direct URL method failed, trying download method...")
-                text = get_subtitles_via_download(ydl, url)
-            
-            if text and len(text) > 50:
-                return {
-                    'title': title,
-                    'text': text,
-                    'video_id': video_id
-                }
-            
-            return None
-
-    except Exception as e:
-        logger.error(f"Critical Error: {e}")
-        return None
-
-def create_zip(title, text, video_id):
-    safe_title = re.sub(r'[\\/*?:"<>|]', '_', title)[:50] or "subtitles"
-    zip_name = f"{video_id}_{uuid.uuid4().hex[:6]}.zip"
-    zip_path = os.path.join(DOWNLOAD_FOLDER, zip_name)
-    
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        content_str = f"Title: {title}\nVideo ID: {video_id}\n\n{text}"
-        zf.writestr(f"{safe_title}.txt", content_str.encode('utf-8'))
-        
-    return zip_name
-
-# === ROUTES ===
 
 @app.route('/')
 def index():
-    cookies_status = "Active" if os.path.exists(COOKIES_FILE) else "Inactive"
-    return f"<h1>Subtitle Service</h1>Status: {cookies_status}<br>Usage: /download?url=VIDEO_URL"
+    # Если токен уже есть, покажем его
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, 'r') as f:
+            token = f.read().strip()
+        return f"""
+        <h1>✅ Токен получен!</h1>
+        <p>Скопируйте этот токен и вставьте в ваш основной код:</p>
+        <textarea style="width:100%; height:100px;">{token}</textarea>
+        <p><a href="/reset">Сбросить и получить новый</a></p>
+        """
 
-@app.route('/download')
-def download_route():
-    url = request.args.get('url')
-    
-    if not url:
-        return Response(json.dumps({"error": "Missing URL"}), status=400)
-    
-    video_id = get_video_id(url)
-    if not video_id:
-        return Response(json.dumps({"error": "Invalid YouTube URL"}), status=400)
-    
-    result = process_video(video_id)
-    
-    if not result:
-        return Response(json.dumps({"error": "Subtitles not found or download failed. (Try replacing cookies.txt or waiting 24h)"}), status=404)
-    
-    zip_filename = create_zip(result['title'], result['text'], result['video_id'])
-    
-    base_url = request.host_url.rstrip('/')
-    return Response(json.dumps({
-        "success": True,
-        "title": result['title'],
-        "download_url": f"{base_url}/file/{zip_filename}",
-        "video_id": result['video_id']
-    }), mimetype='application/json')
+    # Если токена нет, показываем кнопку старта
+    return """
+    <h1>Получение OAuth Токена для Render.com</h1>
+    <p>Нажмите кнопку ниже. Система сгенерирует ссылку.</p>
+    <form action="/start_auth" method="post">
+        <button type="submit" style="padding: 20px; font-size: 20px; background: #FF0000; color: white; border: none; cursor: pointer;">
+            1. Сгенерировать ссылку
+        </button>
+    </form>
+    """
 
-@app.route('/file/<filename>')
-def file_download(filename):
-    path = os.path.join(DOWNLOAD_FOLDER, filename)
-    if not os.path.exists(path):
-        abort(404)
-    return send_file(path, as_attachment=True)
+@app.route('/start_auth', methods=['POST'])
+def start_auth():
+    """
+    Запускает процесс авторизации.
+    Нам нужно сымитировать браузер, чтобы получить oauth_refreshtoken
+    """
+    logger.info("Starting auth process...")
+    
+    # Настраиваем yt-dlp на Android (самый надежный способ)
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'client_id': 'android',
+        # Флаг, который заставляет yt-dlp начать процесс OAuth
+        # В рамках Web App это может быть сложно, но попробуем через extract_flat
+        # ОДНАКО, на самом деле лучший способ - это использовать ссылку
+    }
+    
+    # ВАЖНО: Мы не можем запустить интерактивный режим в Flask.
+    # Но мы можем показать пользователю готовую ссылку для входа.
+    
+    # Генерируем ссылку для YouTube OAuth (Android Client)
+    # client_id для YouTube Android известен:
+    # 539896302262-j0f2hp8p8h8tgag3j0n5g9h6o9k0o8q7.apps.googleusercontent.com (пример)
+    
+    # Мы используем упрощенный подход: даем пользователю ссылку для получения кода
+    auth_url = (
+        "https://www.youtube.com/o/oauth2/auth?"
+        "client_id=674416935537-uiquphecfgtt7v93gdncdppar8jsnu5g.apps.googleusercontent.com&"
+        "redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&"
+        "response_type=code&"
+        "scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fyoutube.force-ssl"
+    )
+    
+    html = f"""
+    <h2>Шаг 2: Авторизация</h2>
+    <ol>
+        <li><a href="{auth_url}" target="_blank"><b>Нажмите сюда, чтобы открыть Google</b></a></li>
+        <li>Войдите в аккаунт (если попросит).</li>
+        <li>В конце вам выдадут <b>Код подтверждения</b> (длинная строка букв и цифр).</li>
+    </ol>
+    
+    <form action="/submit_code" method="post">
+        <label>Вставьте код сюда:</label><br>
+        <input type="text" name="auth_code" style="width: 100%; height: 50px;" placeholder="4/0AX..." required>
+        <br><br>
+        <button type="submit" style="padding: 15px; font-size: 18px;">2. Обменять код на Токен</button>
+    </form>
+    """
+    return html
+
+@app.route('/submit_code', methods=['POST'])
+def submit_code():
+    """
+    Эта функция берет код от Google и меняет его на oauth_refresh_token
+    """
+    code = request.form.get('auth_code')
+    if not code:
+        return "Ошибка: Код не введен"
+
+    logger.info(f"Received code, exchanging for token...")
+    
+    # Используем yt-dlp для обмена кода на токен
+    # Создаем временный файл конфигурации, чтобы yt-dlp не ругался
+    
+    try:
+        # Внимание: здесь мы используем трюк с yt_dlp.YoutubeDL
+        # Но стандартный yt-dlp требует интерактивного режима или cookies.
+        # Самый надежный способ обмена кода - использовать запрос к Google API напрямую
+        # через yt_dlp utils или сам Python.
+        
+        # Простой способ через yt_dlp:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            # Нам нужно сообщить yt-dlp, что мы уже получили код
+            # Но yt-dlp не умеет принимать code напрямую для обмена, он запускает свой цикл.
+        }
+        
+        # Поэтому используем прямой запрос к Google Token Endpoint
+        # Это то, что делает yt-dlp под капотом.
+        import urllib.request
+        import urllib.parse
+        
+        # Данные для обмена
+        data = urllib.parse.urlencode({
+            'client_id': '674416935537-uiquphecfgtt7v93gdncdppar8jsnu5g.apps.googleusercontent.com',
+            'client_secret': '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T',
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': 'urn:ietf:wg:oauth:2.0:oob'
+        }).encode('utf-8')
+        
+        req = urllib.request.Request(
+            'https://oauth2.googleapis.com/token',
+            data=data,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}
+        )
+        
+        with urllib.request.urlopen(req) as response:
+            response_data = json.loads(response.read())
+            
+        if 'refresh_token' in response_data:
+            token = response_data['refresh_token']
+            
+            # Сохраняем в файл
+            with open(TOKEN_FILE, 'w') as f:
+                f.write(token)
+            
+            return redirect('/')
+        else:
+            return f"Ошибка: Токен не получен. Ответ Google: {response_data}"
+            
+    except Exception as e:
+        return f"Ошибка при обмене кода: {e}"
+
+@app.route('/reset')
+def reset():
+    if os.path.exists(TOKEN_FILE):
+        os.remove(TOKEN_FILE)
+    return redirect('/')
 
 if __name__ == '__main__':
-    logger.info(f"Server starting on port {PORT}")
-    if os.path.exists(COOKIES_FILE):
-        logger.info("Cookies file detected.")
-    else:
-        logger.warning("Cookies file NOT detected.")
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    # Render требует запуск на 0.0.0.0
+    app.run(host='0.0.0.0', port=10000)
