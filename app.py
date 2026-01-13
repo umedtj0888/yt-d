@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import yt_dlp
+print(f"yt-dlp version: {yt_dlp.version.__version__}")
 import os
 import tempfile
 
